@@ -1,0 +1,784 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <title>Image Viewer</title>
+    <style>
+      div.statusboard {
+          font-size: 10pt;
+          padding: 4px;
+      }
+      div#pagemode {
+          position: relative;
+      }
+      div#pagemode * {
+          position: absolute;
+          top: 0;
+          left: 0;
+      }
+      #imageStatusDiv {
+          position: absolute;
+          top: 0;
+          left: 0;
+          margin: 30px;
+          padding: 30px;
+          font-size: 32pt;
+          font-weight: bold;
+          color: #000000;
+          background-color: #ffff7f;
+          opacity: 0.6;
+      }
+      div.pagesep {
+          position: relative;
+          height: 200px;
+      }
+      div.pagesep span {
+          position: absolute;
+          bottom: 0;
+          left: 0;
+          color: #eeeeee;
+      }
+      div#printerContentDiv {
+          z-index: 0;
+      }
+      div#printHeaderDiv {
+          position: fixed;
+          top: 0;
+          left: 0;
+          width: 100%;
+          background-color: #222;
+          color: #ccc;
+          padding: 8px;
+          z-index: 1;
+      }
+      img {
+          width: 100%;
+      }
+      .shirinkwrap {
+          display: inline-block; /* shrink to fit */
+          width: 100%;           /* whatever width you like */
+          position: relative;    /* so .content can use position: absolute */
+      }
+      .content {
+          position: absolute;
+          top: 0; bottom: 0; right: 0; left: 0; /* follow the edge of the parent */
+      }
+    </style>
+    <script>
+      var builderDiv, viewerDiv, printerDiv;
+      var TitleText, URLText, LBText, UBText, PrecText, SFXText, ProcessText;
+      var pageImg, pageNumSpan, sectionStateSpan, excludeStateSpan,
+          pageStatusSpan, imageStatusDiv;
+
+      var pages, pageNo, pagesecs;
+      var suffix, suffix_index, autoCruise, autoScroll;
+
+      function clear_image(img) {
+          img.src = "data:image/gif;base64,R0lGODlhAQABAIAAAP///wAAACH5BAEAAAAALAAAAAABAAEAAAICRAEAOw==";
+      }
+
+      function reload_image(img) {
+          var src = img.src;
+          img.src = src;
+      }
+
+      function clear_input() {
+          for (var input of [TitleText, URLText, LBText, UBText, PrecText, SFXText])
+              input.value = "";
+      }
+
+      function pagesep(id) {
+          var div = document.createElement("DIV");
+          var span = document.createElement("SPAN");
+          div.setAttribute("class", "pagesep");
+          div.style.display = "none";
+          div.appendChild(span);
+          return div;
+      }
+
+      function img_set_src(img, src) {
+          img.onerror = (function (reload, interval, limit) {
+              return function () {
+                  interval += interval / 2;
+                  limit -= 1;
+                  if (0 < limit)
+                      setTimeout(reload_image, interval, reload);
+              }
+          })(img, 64, 4);
+          img.src = src;
+      }
+
+      function parse_sections(line) {
+          var secexp = /^(\d+)\([-\d]+\)$/;
+          line.split(" ")
+              .map(function(s){ return s.trim(); })
+              .forEach(
+                  function (sec) {
+                      try {
+                          var m = sec.match(secexp);
+                          var i = parseInt(m[1]) - 1;
+                          pagesecs[i].style.display = "block";
+                      } catch (err) {
+                          ; /* ignore */
+                      }
+                  }
+              );
+      }
+
+      function parse_excludes(line) {
+          var rangeexp = /^(\d+)-(\d+)$/;
+          line.split(",")
+              .map(function(s){ return s.trim(); })
+              .forEach(
+                  function (range) {
+                      try {
+                          var lo = -1, hi = -1;
+                          var m = range.match(rangeexp);
+                          if (m) {
+                              lo = parseInt(m[1]) - 1;
+                              hi = parseInt(m[2]) - 1;
+                          } else {
+                              lo = hi = parseInt(range) - 1;
+                          }
+                          for (var i = lo; i <= hi; i++)
+                              pages[i].style.display = "none";
+                      } catch (err) {
+                          ; /* ignore */
+                      }
+                  }
+              );
+      }
+
+      function apply_process_text() {
+          var insn = { "Excludes:": parse_excludes,
+                       "Sections:": parse_sections, };
+
+          ProcessText.value.split("\n").forEach(
+              function (line) {
+                  for (var tag in insn) {
+                      if (line.startsWith(tag)) {
+                          insn[tag](line.substr(tag.length).trim());
+                          break;
+                      }
+                  }
+              }
+          );
+      }
+
+      function prefill_process_text() {
+          var insn = {
+              "Title:": function (title) { TitleText.value = title; },
+              "URL:": function (url) { URLText.value = url; },
+              "LB-UB:": function (lbub) {
+                  lbub = lbub.split("-");
+                  LBText.value = lbub[0];
+                  UBText.value = lbub[1];
+              },
+              "Prec:": function (prec) { PrecText.value = prec; },
+              "SFX:": function (sfx) { SFXText.value = sfx; },
+          };
+          ProcessText.value.split("\n").forEach(
+              function (line) {
+                  for (var tag in insn) {
+                      if (line.startsWith(tag)) {
+                          insn[tag](line.substr(tag.length).trim());
+                          break;
+                      }
+                  }
+              }
+          );
+      }
+
+      function build_it() {
+          while (printerContentDiv.hasChildNodes())
+              printerContentDiv.removeChild(printerContentDiv.childNodes[0]);
+
+          prefill_process_text();
+
+          var URL, LB, UB, Prec, SFX, Title, test, tumatfch, unsmatch;
+          var unsexp = /^([a-z]+:\/\/.*)\/(\d+)\.([a-z,0-9]+)$/;
+
+          LB = LBText.value;
+          UB = UBText.value;
+          Prec = PrecText.value;
+          SFX = SFXText.value;
+          URL = URLText.value;
+          Title = TitleText.value;
+
+          if (LB == "")
+              LBText.value = LB = "1";
+
+          if ((URL == "") != (Title == ""))
+              test = URL != "" ? URL : Title;
+
+          if (Prec == "")
+              PrecText.value = Prec = "0";
+
+          if (test &&
+              (tumatch = test.match(/^(\S+)\s+(.*)$/)) &&
+              tumatch[1].match(unsexp)) {
+              URLText.value = URL = tumatch[1];
+              TitleText.value = Title = tumatch[2];
+          }
+
+          var matches = URL.match(/^(.*)\/(\d+)\.([a-z,0-9]+)$/);
+          if (unsmatch = URL.match(unsexp)) {
+              URL = URLText.value = unsmatch[1];
+              UB = UBText.value = unsmatch[2];
+              SFX = SFXText.value = unsmatch[3];
+          }
+          LB = parseInt(LB);
+          UB = parseInt(UB);
+          Prec = parseInt(Prec);
+
+          suffix = SFX.split(",")
+              .map(function (s) { return s.trim(); })
+              .filter(function (s) { return 0 < s.length; });
+          suffix_ix = 0;
+
+          document.getElementsByTagName("TITLE")[0].text = TitleText.value;
+
+          pages = [];
+          pagesecs = [];
+          for (var i = LB; i <= UB; i++) {
+              var img = document.createElement("IMG");
+              var istr = i.toString();
+
+              while (istr.length < Prec)
+                  istr = "0".concat(istr);
+
+              img.onload = function () { update_pagestatus_span(); };
+              img.setAttribute("referrerPolicy", "no-referrer");
+              img_set_src(img, `${URL}/${istr}.${suffix[suffix_ix]}`);
+
+              var div = pagesep(i-LB);
+              printerContentDiv.appendChild(div);
+              printerContentDiv.appendChild(img);
+              pages.push(img);
+              pagesecs.push(div);
+          }
+
+          apply_process_text();
+
+          gotopage(0);
+          show_div(viewerDiv);
+
+          reload_all_failed_pages_start();
+      }
+
+      function img_ok(img) {
+          return (img.style.display == "none" ||
+                  (!img.src.startsWith("data:") &&
+                   img.complete &&
+                   img.width > 0 && img.height > 0));
+      }
+
+      function update_pagenum_span() {
+          var pnD = pageNo + 1;
+          var tlD = pages.length;
+          var isD = pageImg.src;
+          var iscompleteD = img_ok(pages[pageNo]) ? "ok" : "??";
+
+          var isSectionHead = (pagesecs[pageNo].style.display != "none") ? "*" : "";
+          isD = isD.substring(isD.lastIndexOf("/") + 1);
+          pageNumSpan.textContent = `${pnD}/${tlD} (${isD}) ${iscompleteD} ${isSectionHead}`;
+      }
+
+      function update_pagestatus_span() {
+          for (var total = 0, ok = 0, i = 0; i < pages.length; i++) {
+              if (pages[i].style.display == "none")
+                  continue;
+              total++;
+              if (img_ok(pages[i]))
+                  ok++;
+          }
+          if (autoCruise) {
+              var scan = autoCruise.pageNo + 1;
+              pageStatusSpan.textContent = `${ok}/${total}/${scan}`;
+          } else
+              pageStatusSpan.textContent = `${ok}/${total}`;
+      }
+
+      function printable_section_list() {
+          var one_printable_section = function (prev, here) {
+              var excluded = 0;
+              for (var j = prev; j < here; j++)
+                  if (pages[j].style.display == 'none')
+                      excluded++;
+              if (excluded)
+                  return `${prev + 1}(${here-prev}-${excluded})`;
+              else
+                  return `${prev + 1}(${here-prev})`;
+          };
+
+          var sections = [];
+          var prev = -1;
+          for (var i of list_sections()) {
+              if (0 <= prev)
+                  sections.push(one_printable_section(prev, i));
+              prev = i;
+          }
+          if (0 <= prev && prev < pages.length)
+              sections.push(one_printable_section(prev, pages.length));
+          return sections.join(' ');
+      }
+
+      function gotopage(page) {
+          if (0 <= page && page < pages.length) {
+              pageNo = page;
+              pageImg.src = pages[pageNo].src;
+              update_pagenum_span();
+              update_pagestatus_span();
+
+              sectionStateSpan.textContent = `${printable_section_list()}`;
+
+              var isXD = (pages[pageNo].style.display == "none" ? "#" : "");
+              excludeStateSpan.textContent = `${isXD}`;
+
+              var s = [];
+              if (pages[pageNo].style.display == "none")
+                  s.push("HIDDEN");
+              if (pagesecs[pageNo].style.display != "none")
+                  s.push("SECTION");
+
+              if (0 < s.length) {
+                  imageStatusDiv.style.display = "inline";
+                  imageStatusDiv.textContent = s.join("/");
+              } else {
+                  imageStatusDiv.style.display = "none";
+              }
+
+              if (printerDiv.style.display != "none") {
+                  if (pages[pageNo].style.display != "none")
+                      pages[pageNo].scrollIntoView();
+              } else {
+                  window.scrollTo(0, 0);
+              }
+          }
+      }
+
+      function count_failed_pages() {
+          var i, cnt;
+          for (i = cnt = 0; i < pages.length; i++)
+              if (!img_ok(pages[i]))
+                  cnt++;
+          return cnt;
+      }
+
+      function goto_failed_page() {
+          var i;
+          for (i = 1; i <= pages.length; i++) {
+              var j = (i + pageNo) % pages.length;
+              if (!img_ok(pages[j])) {
+                  img_set_src(pages[j], pages[j].src);
+                  gotopage(j);
+                  return;
+              }
+          }
+          alert("all pages loaded.");
+      }
+
+      function auto_scroll_pages() {
+          if (!autoScroll)
+              return;
+          gotopage((pageNo + 1) % pages.length);
+          setTimeout(auto_scroll_pages, 500);
+      }
+
+      function reload_all_failed_pages() {
+          if (autoCruise == false)
+              return;
+
+          var current = autoCruise.pageNo;
+          for (var i = 0; i < pages.length; i++) {
+              current = (current + 1) % pages.length;
+              if (!img_ok(pages[current])) {
+                  img_set_src(pages[current], pages[current].src);
+                  break;
+              }
+          }
+
+          if (current != autoCruise.pageNo || !img_ok(pages[current])) {
+              // scan pages rapidly (4 pages per sec) and then
+              // wait for up to 1200 seconds to get responses.
+              const max_interval = 1200 * 1000;
+              var interval = 256;
+              if (current <= autoCruise.pageNo) {
+                  // did we make any progress since the last round?
+                  var ncount = count_failed_pages();
+                  if (autoCruise.count <= ncount) {
+                      interval = autoCruise.interval * 3 / 2;
+                      autoCruise.interval = interval;
+                  } else {
+                      autoCruise.interval = 5000;
+                  }
+                  if (max_interval < interval)
+                      interval = max_interval;
+                  autoCruise.count = ncount;
+              }
+              autoCruise.pageNo = current;
+              setTimeout(reload_all_failed_pages, interval);
+              update_pagestatus_span();
+          } else {
+              autoCruise = false;
+              switch_to_printer_div(false);
+              gotopage(0);
+          }
+      }
+
+      function reload_all_failed_pages_start() {
+          autoCruise = {
+              count: 0,
+              pageNo: 0,
+              interval: 5000,
+          };
+          reload_all_failed_pages();
+      }
+
+      function clear_autocruise() {
+          autoCruise = false;
+          autoScroll = false;
+      }
+
+      function goto_hidden_page(direction) {
+          var i;
+          for (i = 1; i <= pages.length; i++) {
+              var j = (pageNo + i * direction + pages.length) % pages.length;
+              if (pages[j].style.display == "none") {
+                  gotopage(j);
+                  return;
+              }
+          }
+      }
+
+      function pagenav(event) {
+          clear_autocruise();
+
+          var x = event.clientX;
+          var incr = 0;
+          if (x < pageImg.width / 4) {
+              incr = 1;
+          } else if (pageImg.width * 3 / 4 < x) {
+              incr = -1;
+          } else {
+              return;
+          }
+          gotopage(pageNo + incr);
+      }
+
+      function list_sections() {
+          var sections = [];
+          for (var i = 0; i < pagesecs.length; i++) {
+              if (pagesecs[i].style.display != "none")
+                  sections.push(i);
+          }
+          return sections;
+      }
+
+      function exclude_range() {
+          var excludes = [], i, j;
+          for (i = 0; i < pages.length; i++) {
+              if (pages[i].style.display != "none")
+                  continue;
+              for (j = i + 1; j < pages.length; j++) {
+                  if (pages[j].style.display != "none")
+                      break;
+              }
+              // starting at i up to just before j are excluded
+              if (j == i + 1)
+                  excludes.push(`${i+1}`);
+              else if (j == i + 2)
+                  excludes.push(`${i+1}`, `${i+2}`);
+              else {
+                  excludes.push(`${i+1}-${j}`);
+              }
+              i = j - 1;
+          }
+          return excludes.join(", ");
+      }
+
+      function switch_to_viewer_div() {
+          gotopage(pageNo);
+          show_div(viewerDiv);
+      }
+
+      function switch_to_printer_div(interactive) {
+          var incomplete = 0;
+          for (var i = 0; i < pages.length; i++) {
+              if (!img_ok(pages[i])) {
+                  incomplete += 1;
+              }
+          }
+          if (interactive && 0 < incomplete)
+              alert(`There are ${incomplete} unloaded images`);
+
+          var count = 0;
+          for (var i of list_sections()) {
+              var thisNav = pagesecs[i];
+              thisNav.tabIndex = `${++count}`;
+              thisNav.childNodes[0].textContent = `S##${count} (${i + 1})`;
+          }
+
+          var volumeStatusDiv = document.getElementById("volumeStatusDiv");
+          while (volumeStatusDiv.hasChildNodes())
+              volumeStatusDiv.removeChild(volumeStatusDiv.childNodes[0]);
+
+          var p = document.createElement("PRE");
+          var text = "";
+          for (var elem of [`Title: ${TitleText.value}`,
+                            `URL: ${URLText.value}`,
+                            `LB-UB: ${LBText.value}-${UBText.value}`,
+                            `SFX: ${SFXText.value}`,
+                            `Excludes: ${exclude_range()}`,
+                            `Sections: ${printable_section_list()}`]) {
+              text = text.concat(elem.concat("\n"));
+          }
+          p.textContent = text;
+          volumeStatusDiv.appendChild(p);
+
+          var printHeaderDiv = document.getElementById("printHeaderDiv");
+          printHeaderDiv.textContent = TitleText.value;
+
+          clear_image(pageImg);
+          show_div(printerDiv);
+          if (!interactive) {
+              autoScroll = true;
+              auto_scroll_pages();
+          }
+      }
+
+      function section_toggle() {
+          if (pagesecs[pageNo].style.display == "none")
+              pagesecs[pageNo].style.display = "block";
+          else
+              pagesecs[pageNo].style.display = "none";
+          gotopage(pageNo);
+      }
+
+      function exclude_toggle() {
+          if (pages[pageNo].style.display == "none")
+              pages[pageNo].style.display = "block";
+          else
+              pages[pageNo].style.display = "none";
+          gotopage(pageNo);
+      }
+
+      function suffix_toggle() {
+          if (suffix.length == 0) {
+              alert("no suffixes");
+              return;
+          }
+          var URL = URLText.value;
+          var LB = parseInt(LBText.value);
+          suffix_ix = (suffix_ix + 1) % suffix.length;
+
+          for (var i = 0; i < pages.length; i++) {
+              if (img_ok(pages[i]))
+                  continue;
+              img_set_src(pages[i], `${URL}/${LB + i}.${suffix[suffix_ix]}`);
+          }
+          gotopage(pageNo);
+      }
+
+      function next_section(direction) {
+          for (var p = pageNo + direction;
+               0 <= p && p < pagesecs.length;
+               p += direction) {
+              if (pagesecs[p].style.display != "none") {
+                  gotopage(p);
+                  return;
+              }
+          }
+      }
+
+      function keynav_builder(event) {
+          if (event.keyCode == 13) {
+              event.preventDefault();
+              build_it();
+          }
+      }
+
+      var jump = 0;
+      function keynav(event) {
+
+          if (builderDiv.style.display != "none")
+              return keynav_builder(event);
+          var what = event.keyCode;
+          var prevJump = jump;
+          jump = 0;
+
+          var incr = prevJump ? prevJump : 1;
+          switch (event.keyCode) {
+          case 80: /* "P" */
+          case 112: /* "p" */
+              switch_to_printer_div(true);
+              break;
+          case 81: /* "Q" */
+          case 113: /* "q" */
+              show_div(builderDiv);
+              break;
+          case 86: /* "V" */
+          case 118: /* "v" */
+              switch_to_viewer_div();
+              break;
+
+          case 106: /* "j" */
+              gotopage(pageNo + incr);
+              break;
+          case 107: /* "k" */
+              gotopage(pageNo - incr);
+              break;
+
+          case 63: /* "?" */
+              reload_all_failed_pages_start();
+              break;
+          case 47: /* "/" */
+              goto_failed_page();
+              break;
+
+          case 65: /* "A" */
+          case 97: /* "a" */
+              gotopage(prevJump ? (prevJump - 1) : 0);
+              break;
+
+          case 48: case 49: case 50: case 51: case 52:
+          case 53: case 54: case 55: case 56: case 57:
+              jump = prevJump * 10 + event.keyCode - 48;
+              break;
+
+          case 46: /* "." */
+              section_toggle();
+              break;
+          case 74: /* "J" */
+              next_section(incr);
+              break;
+          case 75: /* "K" */
+              next_section(-incr);
+              break;
+
+          case 104: /* "h" */
+              goto_hidden_page(1);
+              break;
+
+          case 88: /* "x" */
+          case 120: /* "x" */
+              exclude_toggle();
+              break;
+
+          case 82: /* "R" */
+          case 114: /* "r" */
+              suffix_toggle();
+              break;
+
+          case 32: /* SP */
+              clear_autocruise();
+              break;
+
+          default:
+              break;
+          }
+      }
+
+      function show_div(which) {
+          builderDiv.style.display = "none";
+          viewerDiv.style.display = "none";
+          printerDiv.style.display = "none";
+          which.style.display = "block";
+          if (builderDiv.style.display != "none") {
+              document.getElementsByTagName("TITLE")[0].text = "Image Viewer";
+          }
+      }
+
+      function startup() {
+          builderDiv = document.getElementById("builderDiv");
+          viewerDiv = document.getElementById("viewerDiv");
+          printerDiv = document.getElementById("printerDiv");
+          printerContentDiv = document.getElementById("printerContentDiv");
+
+          TitleText = document.getElementById("TitleText");
+          URLText = document.getElementById("URLText");
+          LBText = document.getElementById("LBText");
+          UBText = document.getElementById("UBText");
+          PrecText = document.getElementById("PrecText");
+          SFXText = document.getElementById("SFXText");
+          ProcessText = document.getElementById("ProcessText");
+
+          pageImg = document.getElementById("pageImg");
+          pageNumSpan = document.getElementById("pageNumSpan");
+          pageStatusSpan = document.getElementById("pageStatusSpan");
+          imageStatusDiv = document.getElementById("imageStatusDiv");
+          sectionStateSpan = document.getElementById("sectionStateSpan");
+          excludeStateSpan = document.getElementById("excludeStateSpan");
+
+          window.addEventListener('keypress', keynav);
+          pageImg.onload = function () { update_pagenum_span(); };
+
+          show_div(builderDiv);
+      }
+    </script>
+  </head>
+  <body onload="startup()">
+    <div style="width: 100%">
+      <div id="builderDiv">
+        <table>
+          <tr>
+            <td>Title:</td>
+            <td><input type="text" id="TitleText" size="60"></td>
+          </tr>
+          <tr>
+            <td>URL:</td>
+            <td><input type="text" id="URLText" size="60"></td>
+          </tr>
+          <tr>
+            <td>Range:</td>
+            <td><input type="text" id="LBText"
+                       size="4">-<input type="text" id="UBText"
+                                        size="4"></td>
+          </tr>
+          <tr>
+            <td>Prec:</td>
+            <td><input type="text" id="PrecText" size="4"></td>
+          </tr>
+          <tr>
+            <td>Suffix:</td>
+            <td><input type="text" id="SFXText" size="4"></td>
+          </tr>
+          <tr>
+            <td>Desc:</td>
+            <td>
+              <textarea id="ProcessText" rows="8" cols="70"></textarea>
+            </td>
+          </tr>
+          <tr>
+            <td colspan="2">
+              <input type="button" onclick="build_it()" value="Go">
+              <input type="button" onclick="clear_input()" value="Clear">
+	      <a href="ImageViewer.html"><input type="button" value="Self"></a>
+            </td>
+          </tr>
+        </table>
+      </div>
+      <div id="printerDiv">
+        <div id="printHeaderDiv"
+             style=""></div>
+        <div style="margin-top: 40px">
+          <div id="printerContentDiv"></div>
+          <div id="volumeStatusDiv" class="statusboard"></div>
+        </div>
+      </div>
+      <div id="viewerDiv" class="shrinkwrap">
+        <div class="content">
+          <div class="statusboard">
+            <span id="pageNumSpan"></span>
+            <span id="excludeStateSpan"></span>
+            <span id="pageStatusSpan"></span>
+            <span id="sectionStateSpan"></span>
+          </div>
+          <div id="pagemode" onclick="pagenav(event)">
+            <img id="pageImg" referrerPolicy="no-referrer"/>
+            <div id="imageStatusDiv"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </body>
+</html>
